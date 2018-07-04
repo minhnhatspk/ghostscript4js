@@ -145,17 +145,12 @@ void GhostscriptManager::DecreaseWorkers()
 class GhostscriptWorker : public AsyncWorker
 {
   public:
-    GhostscriptWorker(Callback *callback, string RAWcmd)
-        : AsyncWorker(callback), RAWcmd(RAWcmd), res(0) {}
+    GhostscriptWorker(Napi::Function& callback, vector<string> explodedCmd)
+        : Napi::AsyncWorker(callback), explodedCmd(explodedCmd) {}
     ~GhostscriptWorker() {}
 
     void Execute()
     {
-        res = 0;
-        vector<string> explodedCmd;
-        istringstream iss(RAWcmd);
-        for (string RAWcmd; iss >> RAWcmd;)
-            explodedCmd.push_back(RAWcmd);
         int gsargc = static_cast<int>(explodedCmd.size());
         char **gsargv = new char *[gsargc];
         for (int i = 0; i < gsargc; i++)
@@ -193,9 +188,7 @@ class GhostscriptWorker : public AsyncWorker
     }
 
   private:
-    string RAWcmd;
-    int res;
-    stringstream msg;
+    vector<string> explodedCmd;
 };
 
 NAN_METHOD(Version)
@@ -220,31 +213,52 @@ NAN_METHOD(Version)
     info.GetReturnValue().Set(obj);
 }
 
-NAN_METHOD(Execute)
-{
-    Callback *callback = new Callback(info[1].As<Function>());
-    Local<String> JScmd = Local<String>::Cast(info[0]);
-    AsyncQueueWorker(new GhostscriptWorker(callback, *String::Utf8Value(JScmd)));
+vector<string> ConvertArguments(const Napi::CallbackInfo& info) {
+    Napi::Env env = info.Env();
+    if (info.Length() < 1)
+    {
+        throw Napi::Error::New(env, "Sorry method requires 1 argument that represent the Ghostscript command.");
+    }
+    if (!info[0].IsString() && !info[0].IsArray())
+    {
+        throw Napi::Error::New(env, "Sorry method's argument should be a string or an array of strings");
+    }
+    vector<string> explodedCmd;
+    if (info[0].IsString())
+    {
+        string RAWcmd = info[0].As<Napi::String>().Utf8Value();
+        istringstream iss(RAWcmd);
+        for (string RAWcmd; iss >> RAWcmd;)
+            explodedCmd.push_back(RAWcmd);
+    }
+    if (info[0].IsArray())
+    {
+        Napi::Array array = info[0].As<Napi::Array>();
+        for (uint32_t i = 0; i < array.Length(); i++)
+        {
+            Napi::Value value = array[i];
+            if (!value.IsString())
+            {
+                throw Napi::Error::New(env, "Sorry method's argument should be a string or an array of strings");
+            }
+            string RAWcmd = value.As<Napi::String>().Utf8Value();
+            explodedCmd.push_back(RAWcmd);
+        }
+    }
+    return explodedCmd;
+}
+
+void Execute(const Napi::CallbackInfo& info) {
+    vector<string> explodedCmd = ConvertArguments(info);
+    Napi::Function callback = info[1].As<Napi::Function>();
+    GhostscriptWorker* gs = new GhostscriptWorker(callback, explodedCmd);
+    gs->Queue();
 }
 
 NAN_METHOD(ExecuteSync)
 {
-    Nan::HandleScope();
-
-    if (info.Length() < 1)
-    {
-        return Nan::ThrowError("Sorry executeSync() method requires 1 argument that represent the Ghostscript command.");
-    }
-    if (!info[0]->IsString())
-    {
-        return Nan::ThrowError("Sorry executeSync() method's argument should be a string.");
-    }
-    Local<String> JScmd = Local<String>::Cast(info[0]);
-    string RAWcmd = *String::Utf8Value(JScmd);  
-    vector<string> explodedCmd;
-    istringstream iss(RAWcmd);
-    for (string RAWcmd; iss >> RAWcmd;)
-        explodedCmd.push_back(RAWcmd);
+    Napi::Env env = info.Env();
+    vector<string> explodedCmd = ConvertArguments(info);
     int gsargc = static_cast<int>(explodedCmd.size());
     char **gsargv = new char *[gsargc];
     for (int i = 0; i < gsargc; i++)
@@ -266,16 +280,11 @@ NAN_METHOD(ExecuteSync)
 
 //////////////////////////// INIT & CONFIG MODULE //////////////////////////////
 
-NAN_MODULE_INIT(Init)
-{
-    Nan::Set(target, Nan::New<String>("version").ToLocalChecked(),
-                 Nan::New<FunctionTemplate>(Version)->GetFunction());
-
-    Nan::Set(target, Nan::New<String>("execute").ToLocalChecked(),
-                 Nan::New<FunctionTemplate>(Execute)->GetFunction());
-
-    Nan::Set(target, Nan::New<String>("executeSync").ToLocalChecked(),
-                 Nan::New<FunctionTemplate>(ExecuteSync)->GetFunction());
+Napi::Object Init(Napi::Env env, Napi::Object exports) {
+    exports.Set(Napi::String::New(env, "version"), Napi::Function::New(env, Version));
+    exports.Set(Napi::String::New(env, "execute"), Napi::Function::New(env, Execute));
+    exports.Set(Napi::String::New(env, "executeSync"), Napi::Function::New(env, ExecuteSync));
+    return exports;
 }
 
 NODE_MODULE(ghostscript4js, Init)
